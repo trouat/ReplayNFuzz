@@ -15,14 +15,17 @@
 #include <net/ethernet.h>
 #include <netinet/if_ether.h>
 #include <sys/ioctl.h>
+//#include <poll.h>
 #include "ReplayNFuzz.h"
 
 short exec=1;
+pcap_t* handle_cap;
 
 void usage(char *str, FILE *stream) {
-    fprintf(stream,"%susage: ReplayNFuzz <-i> <-f> <-p [-p [-p […]]]> <-t>\n", str);
+    fprintf(stream,"%susage: ReplayNFuzz <-i> <-f> <-p [-p [-p […]]]> <-t> [-c]\n", str);
     fprintf(stream,"%7s-i <interface>\n", SEP);
     fprintf(stream,"%7s-f <pcap file>\n", SEP);
+    fprintf(stream,"%7s-c <pcap file: check target>,<\"my filter\" (pcap form)>\n", SEP);
     fprintf(stream,"%7s-p <nbr packet>:<start offset b10>,<stop offset b10>\n", SEP);
     fprintf(stream,"%7s-t <time between pkts in ms>\n", SEP);
     fprintf(stream,"%7s |-> stop offset and start offset are fuzzed\n", SEP);
@@ -36,6 +39,42 @@ void usage(char *str, FILE *stream) {
 void  INThandler(int sig) {
     exec=0;
 }
+
+void alarm_handler(int sig) {
+    pcap_breakloop(handle_cap);
+    exec=-1;
+}
+
+void pFuzz_close(pFuzz* pfz){
+/*TODO*/
+}
+
+void lframe_close (lframe* lfr){
+/*TODO*/
+}
+
+void chkta_close (chkta* ck) {
+    if (ck->PcapP != NULL){/*DO NOT free pcap object*/
+        pcap_close(ck->PcapP->pcap_out);
+        free(ck->PcapP);
+        ck->PcapP = NULL;
+    }
+    lframe_close(ck->frames);
+    
+    /*TODO*/
+}
+
+void argp_close(argp* ArgP){
+    if (ArgP->chk_ta != NULL){
+        chkta_close(ArgP->chk_ta);
+        free(ArgP->chk_ta);
+        ArgP->chk_ta = NULL;
+    }
+    
+    lframe_close(ArgP->frames);
+    pFuzz_close(ArgP->target);
+}
+    
 
 void save_context(char* filename, argp* ArgP){
     
@@ -263,6 +302,84 @@ int p_dec (pFuzz* pos){
     return 0;
 }
 
+int ck_null (argp* ArgP) {
+    return 0;
+}
+
+int init_pcap_ck (argp* ArgP){
+    chkta* chk = ArgP->chk_ta;
+    
+    chk->PcapP = malloc(sizeof(pcap_prop));
+    pcap_prop* mycap = chk->PcapP;
+
+    mycap->pcap_errbuf[0]='\0';
+    mycap->pcap_out=pcap_open_live(ArgP->inet,96,1,250,mycap->pcap_errbuf);
+    if(pcap_lookupnet(ArgP->inet, &(mycap->net), &(mycap->mask), mycap->pcap_errbuf) == -1){
+        fprintf(stderr, "Couldn't get netmask for device %s: %s\n", ArgP->inet, mycap->pcap_errbuf);
+        mycap->net=0;
+        mycap->mask=0;
+    }
+    if (mycap->pcap_errbuf[0]!='\0') {
+        fprintf(stderr,"%s\n",mycap->pcap_errbuf);
+    }
+    if (!mycap->pcap_out)
+        return 1;
+    if (pcap_compile(mycap->pcap_out,&(mycap->fp),chk->filter,0,mycap->net)== -1) {
+        fprintf(stderr, "Couldn't parse filter %s: %s\n", chk->filter, pcap_geterr(mycap->pcap_out));
+        return 2;
+    }
+    if (pcap_setfilter(mycap->pcap_out,&(mycap->fp))==-1){
+        fprintf(stderr, "Couldn't install filter %s: %s\n", chk->filter, pcap_geterr(mycap->pcap_out));
+        return 3;
+    }
+
+
+    /*timeout for packet listen*/
+    handle_cap = mycap->pcap_out;
+
+    /*prepare poll: validate medium acess*/
+//    mycap-> fd = pcap_get_selectable_fd(mycap->pcap_out);
+//    if (mycap->fd != -1) {
+//        mycap->pfd.fd      = mycap->fd;
+//        mycap->pfd.events  = 0;
+//        mycap->pfd.revents = 0;
+        //poll(&(mycap->pfd),1,100);
+//        fprintf(stdout, "Init poll trigger %i\n", mycap->fd);
+//    }
+//    else {
+//        fprintf(stderr, "Can't init poll /!\\");
+//    }
+    
+    return 0;
+}
+
+int ck_icmp (argp* ArgP) {
+    lframe* ptr_frame  = ArgP->chk_ta->frames;
+    pcap_prop* ptr_cap = ArgP->chk_ta->PcapP;
+    int ret = 1;
+
+    while (ptr_frame != NULL){
+        if (pcap_inject(ptr_cap->pcap_out,ptr_frame->frame,sizeof(u_char)*(ptr_frame->length))==-1) {
+            pcap_perror(ptr_cap->pcap_out,0);
+            return 1;
+        }
+
+//        poll(&(ptr_cap->pfd),0,10);
+        alarm(3);
+        signal(SIGALRM, alarm_handler);
+        ret = pcap_next_ex(ptr_cap->pcap_out,&(ptr_cap->header), &(ptr_cap->packet));
+        usleep(ArgP->time_wait);
+        ptr_frame = ptr_frame->next;
+
+        if ( !ret || (exec == -1) ){
+            return 0;
+        }
+	/*Other check on the frame*/
+    }
+    return ret;
+}
+
+
 char* readable_fs(double size/*in bytes*/, char *buf) {
     int i = 0;
     const char* units[] = {"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"};
@@ -273,6 +390,56 @@ char* readable_fs(double size/*in bytes*/, char *buf) {
     sprintf(buf, "%.*f %s", i, size, units[i]);
     return buf;
 }
+
+int add_ck_target(chkta** chk, const char* params){
+    char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t* cap_ptr;
+    char *f_pcap = NULL, *str = NULL;
+    unsigned int len = strlen(params);
+    unsigned int pos = 0;
+
+    /*split*/ 
+    f_pcap = (char *) malloc(len);
+
+    for (pos=0; params[pos] != ',' && pos < len; pos++)
+        f_pcap[pos]=params[pos];
+    
+    f_pcap[pos]=0; str = f_pcap + (++pos);
+
+    if (pos < len) {
+        while (params[pos])
+            f_pcap[pos]=params[pos++];
+    
+        f_pcap[pos]=0;
+    }
+
+    /*init object*/ 
+    if ((*chk) != NULL){
+        error("pcap for checking purpose aleady defined");
+        exit(-1);
+    }
+
+    (*chk) = malloc(sizeof(chkta));
+    cap_ptr = pcap_open_offline(f_pcap, errbuf);
+
+    (*chk)->pcap_name = f_pcap; /*save purpose*/
+    (*chk)->filter = str;
+
+    if (cap_ptr == NULL) {
+        fprintf(stderr, "error reading pcap file: %s\n", errbuf);
+        error("incorrect arguments\n");
+        exit(-1);
+    }
+    if (!init_frame(&((*chk)->frames), cap_ptr)){
+        error("error on pcap frame reading\n");
+        exit(-1);
+    }
+    (*chk)->PcapP = NULL;
+    pcap_close(cap_ptr);
+    (*chk)->filter = str;
+    return 0;
+}
+
 
 int add_target(pFuzz** target, const char* params){
     struct _3ui ui_params={0,0,0,NULL,NULL};
@@ -341,6 +508,13 @@ unsigned int all_len(pFuzz *target) {
     return target->len + all_len(target->next);
 }
 
+check get_check(argp* ArgP) {
+    if (ArgP->chk_ta == NULL)
+        return ck_null;
+    init_pcap_ck(ArgP);
+    return ck_icmp;
+}
+
 process get_process(argp* ArgP) {
     unsigned int len = all_len(ArgP->target);
     if (len > LEN_MAX_INC)
@@ -355,6 +529,20 @@ void print_args(FILE *stream, argp* ArgP) {
     print_pFuzz(stream, ArgP->target);
     return;
 }
+
+void print_frame(char* str, lframe* frames) {
+
+    fprintf(stdout,str);
+    for(int i=0;i<=frames->length;i++){
+        
+        if (i%16 == 0)
+            fprintf(stdout,"\n");
+
+        fprintf(stdout,"%02x ",frames->frame[i]);
+    }
+}
+
+
 
 int itoptr(argp* ArgP){
     lframe *ptr_fr = ArgP->frames;
@@ -378,7 +566,20 @@ int itoptr(argp* ArgP){
     return 1;
 }
 
-int init_frame(argp* ArgP, pcap_t* cap_ptr){
+/*TODO*/
+//void custom_frame_addr(lframe * frames, u_int8_t mac_src, u_int8_t mac_dst){/*cutom MAC and IP addr*/
+//    ether_header* ether=frames->frame;
+//
+//    ether->ether_dhost = mac_dst;/*repositionner les octets avce la méthode qui va bien
+//    ether->ether_shost = mac_src;
+//
+//    if (ether->ether_type == ETHERTYPE_IP){
+//        iphdr* ip=frames->frame[sizeof(ether_header)];
+//    }
+//     
+//}
+
+int init_frame(lframe** p_frames, pcap_t* cap_ptr){
     struct pcap_pkthdr header;
     lframe* ptr_frame;
     const u_char* packet;
@@ -388,13 +589,13 @@ int init_frame(argp* ArgP, pcap_t* cap_ptr){
     if(packet == NULL)
         return 0;
 
-    ArgP->frames = malloc(sizeof(lframe));
-    ArgP->frames->length = header.len;
-    ArgP->frames->frame = malloc(sizeof(u_char)*header.len);
-    memcpy(ArgP->frames->frame,packet,sizeof(u_char)*header.len);
+    (*p_frames) = malloc(sizeof(lframe)); 
+    (*p_frames)->length = header.len;
+    (*p_frames)->frame = malloc(sizeof(u_char)*header.len);
+    memcpy((*p_frames)->frame,packet,sizeof(u_char)*header.len);
 
-    ptr_frame=ArgP->frames;
-    fprintf(stderr, "1rst\n%7u 0x%X 0x%X\n",ArgP->frames->length, ArgP->frames->frame[header.len-1], packet[header.len-1]);
+    ptr_frame=(*p_frames);
+    fprintf(stderr, "1rst\n%7u 0x%X 0x%X\n",(*p_frames)->length, (*p_frames)->frame[header.len-1], packet[header.len-1]);
 
         packet = pcap_next(cap_ptr, &header);
     while(packet != NULL){
@@ -415,26 +616,34 @@ int init_frame(argp* ArgP, pcap_t* cap_ptr){
 int parse_arg(argp* ArgP, int argc, const  char* argv[]) {
     int c;
     char errbuf[PCAP_ERRBUF_SIZE];
+    pcap_t* cap_ptr;
 
-    while ((c = getopt (argc, argv, "i:f:p:t:")) != -1) {
+    while ((c = getopt (argc, argv, "i:f:p:t:c:")) != -1) {
         switch (c) {
             case 'f':
                 if (ArgP->frames != NULL){
                     error("pcap file already defined");
                     exit(1);
                 }
-                pcap_t* cap_ptr = pcap_open_offline(optarg, errbuf);
+                cap_ptr = pcap_open_offline(optarg, errbuf);
                 ArgP->pcap_name = optarg; /*save purpose*/
                 if (cap_ptr == NULL) {
                     fprintf(stderr, "error reading pcap file: %s\n", errbuf);
                     error("incorrect arguments\n");
                     exit(1);
                 }
-                if (!init_frame(ArgP, cap_ptr)){
+                if (!init_frame(&(ArgP->frames), cap_ptr)){
                     error("error on pcap frame reading\n");
                     exit(1);
                 }
                 pcap_close(cap_ptr);
+                break;
+            case 'c':
+                if (add_ck_target(&(ArgP->chk_ta), optarg)) {
+                    error("incorrect \"check target\" parmeters\n");
+                    exit(6);
+                }
+                fprintf(stdout, "  pcap=%s\n  filter=%s\n", ArgP->chk_ta->pcap_name, ArgP->chk_ta->filter);
                 break;
             case 'p':
                 if (add_target(&(ArgP->target), optarg) != 3) {
@@ -485,11 +694,9 @@ int parse_arg(argp* ArgP, int argc, const  char* argv[]) {
     return 1;
 }
 
-
-
 int main(int argc,const char* argv[]) {
     // Get command line argument
-    argp ArgP={NULL, NULL, 0, NULL};
+    argp ArgP={NULL, NULL, 0, NULL, NULL};
     if(!parse_arg(&ArgP, argc, argv))
         return 1;
 
@@ -515,6 +722,7 @@ int main(int argc,const char* argv[]) {
 
     //function ptr
     process ps = get_process(&ArgP);
+    check chk = get_check(&ArgP);
 
     if (ps == p_inc){
         if(ret)
@@ -543,18 +751,26 @@ int main(int argc,const char* argv[]) {
                 exit(1);
             }
             usleep(ArgP.time_wait);
+            if (!(*chk)(&ArgP)){ /*Validate target alive*/
+                fprintf(stdout, "No response from target in %u ms\n",ArgP.time_wait);
+                print_frame("Check:",ArgP.chk_ta->frames);
+                print_frame("\nFuzz:",ptr_frame);
+                exec=0;
+                break;
+            }
             ptr_frame = ptr_frame->next;
+
         }
-    }while ((*ps)(ArgP.target) && exec);
+    }while ((*ps)(ArgP.target) && exec); /*Fuzz (or custom) frames*/
 
     if (!exec) {
-        fprintf(stderr,"Save and exit!\n");
+        fprintf(stdout,"\nSave and exit!\n");
         save_context(SAVE_FILE, &ArgP);
     }
 
     // Close the PCAP descriptor.
     pcap_close(pcap);
-
+    argp_close(&ArgP);
     return 0;
 }
 
