@@ -303,7 +303,7 @@ int p_dec (pFuzz* pos){
 }
 
 int ck_null (argp* ArgP) {
-    return 0;
+    return 1;
 }
 
 int init_pcap_ck (argp* ArgP){
@@ -423,7 +423,7 @@ int add_ck_target(chkta** chk, const char* params){
 
     /*init object*/ 
     if ((*chk) != NULL){
-        error("pcap for checking purpose aleady defined");
+        error("pcap for checking purpose already defined");
         exit(-1);
     }
 
