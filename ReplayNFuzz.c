@@ -353,7 +353,11 @@ int init_pcap_ck (argp* ArgP){
     return 0;
 }
 
-int ck_icmp (argp* ArgP) {
+/*********************************************
+ * Replays specific frames from a pcap file to identify
+ * if the target is still alive.
+ **********************************************/
+int ck_frames (argp* ArgP) {
     lframe* ptr_frame  = ArgP->chk_ta->frames;
     pcap_prop* ptr_cap = ArgP->chk_ta->PcapP;
     int ret = 1;
@@ -395,23 +399,27 @@ int add_ck_target(chkta** chk, const char* params){
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* cap_ptr;
     char *f_pcap = NULL, *str = NULL;
-    unsigned int len = strlen(params);
+    unsigned int len = strlen(params)+1;
     unsigned int pos = 0;
 
-    /*split*/ 
+    /*split – malloc for f_pac & str*/ 
     f_pcap = (char *) malloc(len);
 
     for (pos=0; params[pos] != ',' && pos < len; pos++)
         f_pcap[pos]=params[pos];
     
-    f_pcap[pos]=0; str = f_pcap + (++pos);
+    if ( params[pos] == ',') {
+        f_pcap[pos]=0; str = f_pcap + (++pos) + 1;
+    } else {
+        str = f_pcap + pos;
+    }
+
 
     if (pos < len) {
         while (params[pos])
             f_pcap[pos]=params[pos++];
-    
-        f_pcap[pos]=0;
     }
+
 
     /*init object*/ 
     if ((*chk) != NULL){
@@ -512,7 +520,7 @@ check get_check(argp* ArgP) {
     if (ArgP->chk_ta == NULL)
         return ck_null;
     init_pcap_ck(ArgP);
-    return ck_icmp;
+    return ck_frames;
 }
 
 process get_process(argp* ArgP) {
@@ -617,6 +625,8 @@ int parse_arg(argp* ArgP, int argc, const  char* argv[]) {
     int c;
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* cap_ptr;
+
+    ArgP->chk_ta = NULL;
 
     while ((c = getopt (argc, argv, "i:f:p:t:c:")) != -1) {
         switch (c) {

@@ -83,11 +83,11 @@ int init_pcap_ck(argp* ArgP);
 
 int p_inc(pFuzz* target);/*comprehensive fuzzing, incremental*/
 int p_dec(pFuzz* target);/*comprehensive fuzzing, decremental*/
-int p_ran(pFuzz* target);/*random sampling with replacement*/
-int p_ran_norep(pFuzz* target);/*random sampling without replacement*/
+int p_ran(pFuzz* target);/*random sampling – draw with replacement*/
+int p_ran_norep(pFuzz* target);/*random sampling – draw without replacement*/
 
 int ck_null(argp* ArgP);/*no check*/
-int ck_icmp(argp* ArgP);/*icmp check*/
+int ck_frames(argp* ArgP);/*replay frames check*/
 
 unsigned long size_struct(unsigned long len);
 
