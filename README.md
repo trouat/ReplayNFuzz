@@ -1,6 +1,12 @@
-# ReplayNFuzz
+# Introduction
+Ce code est un utilitaire permettant de rejouer des trames Ethernet contenues dans un fichier PCAP ou capturées sur une interface réseau. Il permet également de faire du « fuzzing » sur certaines parties de ces trames, c'est-à-dire de les modifier de manière aléatoire pour tester la robustesse d'un système ou d'un protocole en réseau.
+
+Le programme peut être exécuté avec divers arguments en ligne de commande pour spécifier l'interface réseau à utiliser, le fichier PCAP à utiliser, les trames à modifier et le délai entre chaque trame envoyée. Des exemples d'utilisation sont donnés dans l'aide en ligne de la commande.
+
+# Compilation
 `gcc -Wall ReplayNFuzz.c -o ReplayNFuzz.out -lm -lpcap`
 
+# Utilisation
     usage: ReplayNFuzz <-i> <-f> <-p [-p [-p […]]]> <-t> [-c]
            -i <interface>
            -f <pcap file>
